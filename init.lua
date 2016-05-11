@@ -44,6 +44,7 @@ local function pushHook( thread, hook, mask, count )
 			mask = {},
 			count = {},
 		}
+		threads[ thread ] = struct
 	end
 	local struct_i, struct_hook, struct_mask, struct_count
 	= struct.i + 1, struct.hook, struct.mask, struct.count

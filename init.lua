@@ -1,36 +1,41 @@
+local DBP = {}
+
+
 --yes, we do need these locals, because this is a *debugging* module and we don't want the debug library to be messed with by overriden globals
-local assert, type, string_gmatch, coroutine_running
-    = assert, type, string.gmatch, coroutine.running
+local assert, type, string_gmatch, coroutine_running, debug_sethook, debug_gethook
+    = assert, type, string.gmatch, coroutine.running, debug.sethook, debug.gethook
+
+
+local instructionCounter = 1
+
 
 --option constants.
---bitwise OR like it's C 99
+--let's bitwise OR like it's C 99
 local mask_c = 1
 local mask_r = 2
 local mask_l = 4
 
 
 --i hate single use metatables :P (and so does memory)
-local threads = { __mode = 'k' } setmetatable( threads, threads )
+local threads = { __mode = 'k' }
+setmetatable( threads, threads )
 
 
-
-local function pushHook( thread, hook, mask, count )
-	--check if type is what we expect
-	--if it isn't, shift the arguments and assign the default
-	--this way the hook stack will also have full information and not have nil holes
-	if type( thread ) ~= 'thread' then
-		hook = coroutine_running()
-		hook, mask, count = thread, hook, mask
-	end
-	assert( type( hook ) ~= 'function', "hook must be a function" )
-	assert( type( mask ) ~= 'string', "mask must be a string" )
+---Pushes a new hook onto the hook stack of a thread.
+--Its signature is not the same as debug.sethook!
+function DBP.pushHook( hook, mask, count, thread )
+	thread = thread or coroutine_running()
 	count = count or 0
+	assert( type( thread ) == 'thread', "thread must be a thread" )
+	assert( type( hook ) == 'function', "hook must be a function" )
+	assert( type( mask ) == 'string', "mask must be a string" )
+	assert( type( count ) == 'number', "count must be a number" )
 	
-	local c, r, l
+	local c, r, l = 0, 0, 0
 	for char in string_gmatch( mask, '.' ) do
-		if char == 'c' then c = true
-		elseif char == 'r' then r = true
-		elseif char == 'l' then l = true
+		if char == 'c' then c = mask_c
+		elseif char == 'r' then r = mask_r
+		elseif char == 'l' then l = mask_l
 		end
 	end
 	mask = c + r + l --classic C style binary ORing, because that's so h4x0r
@@ -47,15 +52,16 @@ local function pushHook( thread, hook, mask, count )
 		threads[ thread ] = struct
 	end
 	local struct_i, struct_hook, struct_mask, struct_count
-	= struct.i + 1, struct.hook, struct.mask, struct.count
+	    = struct.i, struct.hook, struct.mask, struct.count
 	struct_hook[ struct_i ] = hook
 	struct_mask[ struct_i ] = mask
 	struct_count[ struct_i ] = count
-	struct.i = struct_i
+	struct.i = struct_i + 1
 end
 
 
-local function popHook( thread )
+function DBP.popHook( thread )
+	thread = thread or coroutine_running()
 	if not thread then thread = coroutine_running() end
 	local struct = threads[ threads ]
 	if struct then
@@ -68,30 +74,30 @@ local function popHook( thread )
 end
 
 
-local instructionCounter = 0
-local function superHook( event, lineno )
+---The hook that runs all registered hooks.
+function DBP.superHook( event, lineno )
 	--idk how Lua handles count events, but the documentation does not define it, so i'll assume it's Undefined Behaviour
 	instructionCounter = instructionCounter + 1
 	local struct = threads[ coroutine_running() ]
 	if struct then
-		local struct_mask = struct.mask
 		--i'm too tired to explain why subtraction works here
 		--just trust me it's the same as if we checked whether
 		--the right side of the equality check was in the set
-		for i = 1, struct.i do
+		for i = 1, struct.i - 1 do
+			local struct_mask = struct.mask[ i ]
 			if (event == 'call' or event == 'tail call') and
 				struct_mask - mask_r - mask_l == mask_c then
-				struct.hook( event, lineno )
+				struct.hook[ i ]( event, lineno )
 			elseif event == 'return' and
 				struct_mask - mask_c - mask_l == mask_r then
-				struct.hook( event, lineno )
+				struct.hook[ i ]( event, lineno )
 			elseif event == 'line' and
 				struct_mask - mask_c - mask_r == mask_l then
-				struct.hook( event, lineno )
-			elseif event == 'count' then
-				if instructionCounter % struct.count == 0 then
-					struct.hook( event, lineno )
-				end
+				struct.hook[ i ]( event, lineno )
+			elseif event == 'count' and
+				struct.count[ i ] ~= 0 and
+				instructionCounter % struct.count[ i ] == 0 then
+					struct.hook[ i ]( event, lineno )
 			--else error"what are you trying to accomplish?"
 			end
 		end
@@ -99,7 +105,27 @@ local function superHook( event, lineno )
 end
 
 
-return {
-	pushHook = pushHook,
-	popHook = popHook
-}
+function DBP.register( thread )
+	thread = thread or coroutine_running()
+	debug_sethook( thread, DBP.superHook, 'crl', 1 )
+end
+
+
+---Append to current debugging session.
+function DBP.append( thread )
+	thread = thread or coroutine_running()
+	local h, m, c = debug_gethook( thread )
+	if h then
+		DBP.pushHook( h, m, c )
+	end
+	DBP.register( thread )
+end
+
+
+--for statistics and such
+function DBP.getIC() return instructionCounter end
+--if the IC gets too huge
+function DBP.resetIC() instructionCounter = 1 end
+
+
+return DBP
